@@ -234,12 +234,10 @@
             const start = new Date(activePlan.startDate);
             start.setHours(0, 0, 0, 0);
             const diffTime = today.getTime() - start.getTime();
-            // 改用 Math.round 避免日光節約時間造成的誤差
             return Math.round(diffTime / (1000 * 60 * 60 * 24)) + 1;
           }, [activePlan.startDate]);
 
           const jumpToToday = () => {
-            // v1.18 修改：直接跳轉到真實的「今天」天數，不限制在 1 ~ totalDays 內
             setCurrentDay(actualTodayNum);
           };
 
@@ -271,17 +269,20 @@
 
           const progressPercentage = combinations.length > 0 ? Math.round((completedCount / combinations.length) * 100) : 0;
 
-          const weaknessItems = useMemo(() => {
-            return combinations.filter(item => {
-              const comboId = `${item.initial.symbol}-${item.vowel.symbol}`;
-              return !!starredItems[comboId];
-            });
-          }, [combinations, starredItems]);
+          // v1.20 修改：將弱點特訓改為「快照 (Snapshot)」模式，避免取消星星時卡片立刻消失
+          const [weaknessSnapshot, setWeaknessSnapshot] = useState([]);
 
-          // v1.18 修改：移除自動重置為 1 的邏輯，允許 currentDay 超出範圍以顯示尚未開始或已結束
+          useEffect(() => {
+            // 只有在「切換到弱點特訓分頁」時，才擷取目前的星星清單
+            if (activeTab === 'weakness') {
+              setWeaknessSnapshot(combinations.filter(item => {
+                const comboId = `${item.initial.symbol}-${item.vowel.symbol}`;
+                return !!starredItems[comboId];
+              }));
+            }
+          }, [activeTab, combinations]); // 注意：刻意不把 starredItems 放入依賴陣列，這就是保留卡片的關鍵！
 
           const todayItems = useMemo(() => {
-            // v1.18 修改：如果今天不在計畫天數範圍內，回傳空陣列
             if (currentDay < 1 || currentDay > totalDays) return [];
             const start = (currentDay - 1) * activePlan.itemsPerDay;
             return combinations.slice(start, start + activePlan.itemsPerDay);
@@ -366,7 +367,6 @@
             setTimeout(() => setToastMessage(''), 3000);
           };
 
-          // 核心修復：完整無缺的行事曆匯出邏輯
           const handleExportCalendar = () => {
             try {
               let icsContent = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//CVC Pronunciation App//TW\r\nCALSCALE:GREGORIAN\r\n";
@@ -381,7 +381,6 @@
               const now = new Date();
               const dtStamp = now.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
 
-              // 將每一天的練習項目轉換為一個 VEVENT 事件
               daysData.forEach((dayItems, dayIndex) => {
                 const current = new Date(activePlan.startDate);
                 current.setDate(current.getDate() + dayIndex);
@@ -414,7 +413,6 @@
 
               icsContent += "END:VCALENDAR\r\n";
               
-              // 檔名自動加入時間戳記
               const yyyy = now.getFullYear();
               const mm = String(now.getMonth() + 1).padStart(2, '0');
               const dd = String(now.getDate()).padStart(2, '0');
@@ -433,10 +431,18 @@
             }
           };
 
+          // v1.19 核心修改：將所有排程設定 (activePlan) 與草稿狀態 (draft) 一起打包進 JSON
           const handleExportProgress = () => {
             const exportData = {
               completedItems: completedItems,
-              starredItems: starredItems
+              starredItems: starredItems,
+              activePlan: activePlan,
+              draftStartDate: draftStartDate,
+              draftItemsPerDay: draftItemsPerDay,
+              draftPlanMode: draftPlanMode,
+              draftTargetDays: draftTargetDays,
+              draftInitialFilters: draftInitialFilters,
+              draftVowelFilters: draftVowelFilters
             };
             const dataStr = JSON.stringify(exportData);
             
@@ -452,10 +458,11 @@
             const filename = `CVC_進度備份_${timestamp}.json`;
 
             downloadFile(dataStr, filename, 'application/json;charset=utf-8;');
-            setToastMessage('進度與收藏已匯出備份！');
+            setToastMessage('包含排程設定的完整進度已匯出備份！');
             setTimeout(() => setToastMessage(''), 3000);
           };
 
+          // v1.19 核心修改：匯入時同步讀取並套用排程設定 (activePlan)，避免日期跑掉
           const handleImportProgress = (event) => {
             const file = event.target.files[0];
             if (!file) return;
@@ -465,13 +472,31 @@
               try {
                 const importedData = JSON.parse(e.target.result);
                 if (typeof importedData === 'object') {
+                  
+                  // 載入排程與草稿設定 (v1.19 新增，向下相容)
+                  if (importedData.activePlan) setActivePlan(importedData.activePlan);
+                  if (importedData.draftStartDate) setDraftStartDate(importedData.draftStartDate);
+                  if (importedData.draftItemsPerDay) setDraftItemsPerDay(importedData.draftItemsPerDay);
+                  if (importedData.draftPlanMode) setDraftPlanMode(importedData.draftPlanMode);
+                  if (importedData.draftTargetDays) setDraftTargetDays(importedData.draftTargetDays);
+                  if (importedData.draftInitialFilters) setDraftInitialFilters(importedData.draftInitialFilters);
+                  if (importedData.draftVowelFilters) setDraftVowelFilters(importedData.draftVowelFilters);
+
+                  // 載入打勾與星星進度
                   if (importedData.completedItems !== undefined || importedData.starredItems !== undefined) {
                     if (importedData.completedItems) setCompletedItems(importedData.completedItems);
-                    if (importedData.starredItems) setStarredItems(importedData.starredItems);
+                    if (importedData.starredItems) {
+                      setStarredItems(importedData.starredItems);
+                      // v1.20 新增：如果在弱點特訓分頁匯入，需強制更新快照
+                      if (activeTab === 'weakness') {
+                        setWeaknessSnapshot(combinations.filter(item => !!importedData.starredItems[`${item.initial.symbol}-${item.vowel.symbol}`]));
+                      }
+                    }
                   } else {
                     setCompletedItems(importedData);
                   }
-                  setToastMessage('進度與收藏已成功匯入！');
+                  
+                  setToastMessage('進度、收藏與排程設定已成功匯入！');
                 }
               } catch (error) { setToastMessage('檔案格式錯誤，匯入失敗。'); }
               setTimeout(() => setToastMessage(''), 3000);
@@ -487,7 +512,8 @@
                   <div>
                     <h1 className="text-2xl font-bold text-slate-800 tracking-wide flex items-center gap-2">
                       CVC 發音練習排程
-                      <span className="text-sm text-slate-500 font-bold bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-lg tracking-normal">v1.18</span>
+                      {/* v1.20 版次更新 */}
+                      <span className="text-sm text-slate-500 font-bold bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-lg tracking-normal">v1.20</span>
                     </h1>
                     <p className="text-slate-500 text-sm mt-1">規劃專屬的 CVC 發音練習計畫</p>
                   </div>
@@ -780,19 +806,23 @@
                           <p className="text-amber-700 font-medium text-sm">這些是您在練習時標記為困難的組合。集中火力反覆練習，各個擊破！</p>
                         </div>
 
-                        {weaknessItems.length === 0 ? (
+                        {/* v1.20 修改：改用 weaknessSnapshot 渲染 */}
+                        {weaknessSnapshot.length === 0 ? (
                           <div className="bg-white p-12 rounded-2xl text-center border border-slate-100 shadow-sm">
                             <svg className="w-16 h-16 text-slate-200 mx-auto mb-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
                             <p className="text-slate-400 text-lg font-medium">目前沒有收藏的困難音。<br/>在「今日練習」或「隨機練習」點擊右上角的星星即可加入此處。</p>
                           </div>
                         ) : (
                           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
-                            {weaknessItems.map((item, index) => {
+                            {weaknessSnapshot.map((item, index) => {
                               const comboId = `${item.initial.symbol}-${item.vowel.symbol}`;
+                              // v1.20 新增：動態判斷該卡片目前的星星狀態
+                              const isStarred = !!starredItems[comboId]; 
                               return (
                                 <div key={index} className="bg-white px-2 py-5 sm:px-4 sm:py-6 rounded-2xl shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-2 transition-transform hover:-translate-y-1 hover:shadow-md relative group overflow-hidden">
-                                  <button onClick={(e) => toggleStar(e, comboId)} className="absolute top-2 right-2 sm:top-3 sm:right-3 p-1 rounded-full transition-colors hover:bg-slate-50 focus:outline-none" title="取消標記">
-                                    <svg className="w-5 h-5 sm:w-6 sm:h-6 text-yellow-400 fill-yellow-400 hover:text-slate-300 hover:fill-none transition-all" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+                                  {/* v1.20 修改：星星按鈕樣式改為動態切換 */}
+                                  <button onClick={(e) => toggleStar(e, comboId)} className="absolute top-2 right-2 sm:top-3 sm:right-3 p-1 rounded-full transition-colors hover:bg-slate-50 focus:outline-none" title={isStarred ? "取消標記" : "標記為困難音"}>
+                                    <svg className={`w-5 h-5 sm:w-6 sm:h-6 transition-colors ${isStarred ? 'text-yellow-400 fill-yellow-400' : 'text-slate-300 group-hover:text-yellow-200'}`} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill={isStarred ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
                                   </button>
                                   
                                   <div className="flex items-center justify-center whitespace-nowrap w-full text-lg sm:text-xl lg:text-2xl xl:text-lg 2xl:text-xl font-bold tracking-tight mt-2 sm:mt-3">
